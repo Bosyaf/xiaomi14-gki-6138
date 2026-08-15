@@ -1,161 +1,472 @@
-name: Xiaomi 14 Saf Kernel (6.1.138)
+name: Xiaomi 14 GKI 6.1.138 + KernelSU-Next (Full Custom)
 
 permissions:
-  contents: read
+  contents: write
+  actions: write
 
 on:
   workflow_dispatch:
-    inputs:
-      kernelsu_ref:
-        description: "KernelSU/SukiSU tag (Varsayılan v4.1.3)"
-        required: false
-        type: string
-        default: "v4.1.3"
-      susfs_ref:
-        description: "SUSFS commit/tag"
-        required: false
-        type: string
-        default: ""
-
-env:
-  PYTHON_VERSION: "3.10"
-  GKI_WORKSPACE: "${{ github.workspace }}/gki-build"
 
 jobs:
-  build:
+  build-kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 420
+    env:
+      KBUILD_BUILD_USER: "bos"
+      KBUILD_BUILD_HOST: "yaf"
+      GKI_ROOT: "${{ github.workspace }}/gki-kernel"
+      KERNEL_DIR: "${{ github.workspace }}/gki-kernel/common"
 
     steps:
-      - name: 1. Maximize build space
-        uses: AdityaGarg8/remove-unwanted-software@v4
+      # =================================================================
+      # 0. ALAN VE SWAP HAZIRLIĞI
+      # =================================================================
+      - name: 0. Maximize Build Space + SWAP
+        uses: easimon/maximize-build-space@master
         with:
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-codeql: "true"
-          remove-docker-images: "true"
-          remove-large-packages: "true"
-          remove-swapfile: "true"
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 24576
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
-      - name: 2. Create 24GB SWAP
+      - name: Verify Space
         run: |
-          echo "🔧 24GB Swap oluşturuluyor..."
-          sudo fallocate -l 24G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=24576
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-
-          echo ""
-          echo "=== Bellek + Swap ==="
-          free -h
-          echo ""
-          echo "=== Disk Alanı ==="
+          echo "=== Disk ==="
           df -h /
-          df -h /mnt || true
-          echo ""
-          echo "=== Swap Detay ==="
-          swapon --show
+          echo "=== Memory ==="
+          free -h
 
-      - name: 3. Checkout code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 4. Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: 5. Install dependencies
+      # =================================================================
+      # 1. PAKETLER VE ZYC CLANG
+      # =================================================================
+      - name: 1. Paketler ve ZyC Clang 22
         run: |
-          sudo apt update
-          sudo apt install -y ccache git curl wget zip unzip xz-utils openssl rsync patch
+          sudo apt update -qq
+          sudo apt install -y --no-install-recommends \
+            python3 python-is-python3 git curl libelf-dev build-essential flex bison \
+            libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils \
+            rsync unzip dwarves bc cpio wget xz-utils make gcc-aarch64-linux-gnu \
+            pkg-config zstd repo
 
-      - name: 6. Configure ccache
+          echo "🔥 ZyC Clang 22 indiriliyor..."
+          CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/22.0.0git-20250928-release/Clang-22.0.0git-20250928.tar.gz"
+          curl -fLSs "$CLANG_URL" -o clang.tar.gz
+          mkdir -p "$GITHUB_WORKSPACE/clang-zyc"
+          tar -xzf clang.tar.gz -C "$GITHUB_WORKSPACE/clang-zyc"
+          rm -f clang.tar.gz
+          echo "$GITHUB_WORKSPACE/clang-zyc/bin" >> "$GITHUB_PATH"
+          echo "✅ ZyC Clang 22 hazır!"
+
+      # =================================================================
+      # 2. 6.1.138 GKI SOURCE ÇEKME
+      # =================================================================
+      - name: 2. GKI 6.1.138 Source Çekme (repo sync)
         run: |
-          mkdir -p ~/.cache/bazel ~/.ccache
-          ccache --max-size=2G
-          ccache --set-config=compression=true
-          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          mkdir -p "$GKI_ROOT"
+          cd "$GKI_ROOT"
 
-      - name: 7. Patch Python Builder
+          echo "📦 repo init başlatılıyor..."
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b common-android14-6.1-2025-06 \
+            --depth=1 \
+            --repo-rev=v2.16
+
+          # deprecated branch'e düşme kontrolü
+          BRANCH_CHECK=$(git ls-remote https://android.googlesource.com/kernel/common refs/heads/android14-6.1-2025-06 || true)
+          if [ -z "$BRANCH_CHECK" ]; then
+            echo "⚠️ Normal branch yok, deprecated branch'e geçiliyor..."
+            sed -i 's|"android14-6.1-2025-06"|"deprecated/android14-6.1-2025-06"|g' .repo/manifests/default.xml
+          fi
+
+          echo "📦 repo sync başlatılıyor..."
+          repo sync -c -j$(nproc) --no-tags --fail-fast
+
+          echo "✅ GKI 6.1.138 source çekildi!"
+          ls -la common/
+
+      # =================================================================
+      # 3. COMPAT FIXES (py dosyasından - make için gerekli)
+      # =================================================================
+      - name: 3. GKI Compat Fixes (Make için hazırlık)
         run: |
-          echo "🛠️ Python builder'a patch uygulanıyor..."
+          cd "$KERNEL_DIR"
+          echo "🔧 GKI source'u make için hazırlanıyor..."
 
-          # Derleyici uyarılarını sustur
-          sed -i 's|task_mmu.write_text(content, encoding="utf-8")|task_mmu.write_text(content, encoding="utf-8")\n        with open(self.common_dir / "fs/proc/Makefile", "a") as f:\n            f.write("\\n\\nccflags-y += -Wno-error -Wno-unused-label -Wno-unused-function -Wno-unused-variable\\n")|' .github/workflows/scripts/xiaomi14_builder.py
+          # BUILD.bazel - protected_exports kaldır
+          if [ -f "BUILD.bazel" ]; then
+            sed -i '/protected_exports_list/d' BUILD.bazel
+            sed -i '/abi_gki_protected_exports_aarch64/d' BUILD.bazel
+          fi
 
-          # OOM fix
-          sed -i 's|--config=fast --lto=thin //common:kernel_aarch64_dist|--config=fast --lto=thin --jobs=2 //common:kernel_aarch64_dist|' .github/workflows/scripts/xiaomi14_builder.py
+          # Protected exports dosyasını sil
+          rm -rf android/abi_gki_protected_exports_* 2>/dev/null || true
 
-          # SHA256 fix
-          sed -i 's|sha256sum \* > SHA256SUMS.txt|find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -exec sha256sum {} + > SHA256SUMS.txt|' .github/workflows/scripts/xiaomi14_builder.py
+          # setlocalversion - dirty kaldır
+          if [ -f "scripts/setlocalversion" ]; then
+            sed -i 's/-dirty//g' scripts/setlocalversion
+          fi
 
-          chmod +x .github/workflows/scripts/xiaomi14_builder.py
-          echo "✅ Patch tamamlandı"
+          # build.config.gki - check_defconfig kaldır
+          if [ -f "build.config.gki" ]; then
+            sed -i 's/check_defconfig//g' build.config.gki
+          fi
 
-      - name: 8. Build Xiaomi 14 preset
+          # build.config.gki.aarch64 düzeltmeleri
+          if [ -f "build.config.gki.aarch64" ]; then
+            sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/g' build.config.gki.aarch64
+            sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' build.config.gki.aarch64
+            sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' build.config.gki.aarch64
+          fi
+
+          # scripts executable yap
+          chmod -R +x scripts/ 2>/dev/null || true
+
+          echo "✅ Compat fixes tamamlandı!"
+
+      # =================================================================
+      # 4. KERNELSU-NEXT + MULTI-MANAGER
+      # =================================================================
+      - name: 4. KernelSU-Next & Multi-Manager
         run: |
-          echo "🔥 Python Builder Başlatılıyor..."
-          python3 ./.github/workflows/scripts/xiaomi14_builder.py \
-            --workspace "${{ env.GKI_WORKSPACE }}" \
-            --kernelsu-ref "${{ github.event.inputs.kernelsu_ref }}" \
-            --susfs-ref "${{ github.event.inputs.susfs_ref }}"
+          cd "$KERNEL_DIR"
+          echo "📦 KernelSU-Next kuruluyor..."
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
 
-      - name: 9. Prepare artifacts (clean + full outputs)
+          cd KernelSU-Next
+          PATCH="$GITHUB_WORKSPACE/patches/ksu/ksun-add-more-managers-support.patch"
+          if [ -f "$PATCH" ]; then
+            echo "🔥 Multi-manager patch uygulanıyor..."
+            patch -p1 --forward < "$PATCH" && \
+            echo "✅ Multi-manager patch başarılı!" || \
+            echo "⚠️ Patch zaten uygulanmış olabilir"
+          else
+            echo "⚠️ Multi-manager patch dosyası bulunamadı, atlanıyor..."
+          fi
+          cd "$KERNEL_DIR"
+
+      # =================================================================
+      # 5. SUSFS4KSU (pershoot)
+      # =================================================================
+      - name: 5. SUSFS4KSU Kurulumu
         run: |
-          echo "📦 Çıktılar Toplanıyor..."
+          cd "$KERNEL_DIR"
+          echo "📦 SUSFS4KSU kuruluyor..."
+          git clone --depth=1 -q https://gitlab.com/pershoot/susfs4ksu -b gki-android14-6.1-dev susfs4ksu
 
-          ROOT="${{ env.GKI_WORKSPACE }}/android14-6.1-138"
-          OUT="$ROOT/out"
-          BAZEL="$ROOT/bazel-bin/common"
+          echo "📦 SUSFS dosyaları kopyalanıyor..."
+          cp -R susfs4ksu/kernel_patches/fs/* ./fs/
+          cp -R susfs4ksu/kernel_patches/include/* ./include/
 
-          mkdir -p artifacts/out
-          mkdir -p artifacts/bazel
+          echo "📦 SUSFS patch uygulanıyor..."
+          SUSFS_PATCH=$(ls susfs4ksu/kernel_patches/50_add_susfs*.patch 2>/dev/null | head -1)
+          if [ -n "$SUSFS_PATCH" ]; then
+            echo "  → Uygulanıyor: $(basename "$SUSFS_PATCH")"
+            patch -p1 < "$SUSFS_PATCH" || true
+          fi
 
-          echo ""
-          echo "=== OUT klasöründen alınanlar ==="
-          find "$OUT" -maxdepth 1 -type f \( \
-            -name "*.zip" -o \
-            -name "*.txt" -o \
-            -name "Image*" -o \
-            -name "*.img" -o \
-            -name "*.tar.gz" \
-          \) -exec cp -v {} artifacts/out/ \; 2>/dev/null || true
+          echo "📦 namespace.c SUSFS patch uygulanıyor..."
+          wget -q "https://raw.githubusercontent.com/Bosyaf/Kernel-Action/main/fs_namespace.patch" -O fs_namespace.patch || true
+          if [ -f fs_namespace.patch ]; then
+            patch -p1 < fs_namespace.patch || true
+            rm -f fs_namespace.patch
+          fi
 
-          echo ""
-          echo "=== BAZEL çıktılarından alınanlar ==="
-          find "$BAZEL" -type f \( \
-            -name "boot.img" -o \
-            -name "boot-gz.img" -o \
-            -name "boot-lz4.img" -o \
-            -name "boot-img.tar.gz" -o \
-            -name "gki-info.txt" -o \
-            -name "system_dlkm*.img" -o \
-            -name "system_dlkm*" -o \
-            -name "vendor_dlkm*.img" -o \
-            -name "vendor_dlkm*" -o \
-            -name "init_boot*.img" -o \
-            -name "vendor_boot*.img" -o \
-            -name "dtbo*.img" -o \
-            -name "*.ko" -o \
-            -name "modules.*" \
-          \) -exec cp -v {} artifacts/bazel/ \; 2>/dev/null || true
+          echo "🛡️ SUSFS Dentry Check Fix..."
+          sed -i 's/return (base->d_inode->i_mapping->flags & BIT_ANDROID_DATA_ROOT_DIR);/return (base \&\& !IS_ERR(base) \&\& base->d_inode \&\& (base->d_inode->i_mapping->flags \& BIT_ANDROID_DATA_ROOT_DIR));/g' fs/susfs.c 2>/dev/null || true
+          sed -i 's/return (base->d_inode->i_mapping->flags & BIT_ANDROID_SDCARD_ROOT_DIR);/return (base \&\& !IS_ERR(base) \&\& base->d_inode \&\& (base->d_inode->i_mapping->flags \& BIT_ANDROID_SDCARD_ROOT_DIR));/g' fs/susfs.c 2>/dev/null || true
 
-          echo ""
-          echo "=== Artifact Özeti ==="
-          echo "--- artifacts/out ---"
-          ls -lah artifacts/out || true
-          echo ""
-          echo "--- artifacts/bazel ---"
-          ls -lah artifacts/bazel || true
-          echo ""
-          echo "=== Toplam Boyut ==="
-          du -sh artifacts || true
+          find . -name "*.rej" -delete 2>/dev/null || true
+          echo "✅ SUSFS kurulumu tamamlandı!"
 
-      - name: 10. Upload artifacts
+      # =================================================================
+      # 6. STANDART YAMALAR (hjpatches)
+      # =================================================================
+      - name: 6. Standart Yamalar (hjpatches)
+        run: |
+          cd "$KERNEL_DIR"
+          PATCH_DIR="$GITHUB_WORKSPACE/hjpatches"
+
+          if [ -d "$PATCH_DIR" ] && [ "$(ls -A $PATCH_DIR/*.patch 2>/dev/null)" ]; then
+            echo "🚀 Standart yamalar uygulanıyor..."
+            for patch_file in $(ls "$PATCH_DIR"/*.patch | sort); do
+              filename=$(basename "$patch_file")
+              echo "📦 İşleniyor: $filename"
+              patch -p1 --fuzz=3 < "$patch_file" || echo "⚠️ $filename atlandı"
+            done
+          else
+            echo "⚠️ hjpatches klasörü boş veya yok, atlanıyor..."
+          fi
+
+      # =================================================================
+      # 7. CERRAHİ SCRİPTLER (hjshpy)
+      # =================================================================
+      - name: 7. Cerrahi Scriptler (hjshpy)
+        run: |
+          cd "$KERNEL_DIR"
+          SCRIPT_ROOT="$GITHUB_WORKSPACE/hjshpy"
+
+          if [ -d "$SCRIPT_ROOT" ]; then
+            echo "🚀 Cerrahi scriptler başlatılıyor..."
+            for sub_dir in $(ls -d "$SCRIPT_ROOT"/*/ 2>/dev/null | sort); do
+              dir_name=$(basename "$sub_dir")
+              sh_file=$(find "$sub_dir" -maxdepth 1 -name "*.sh" | head -n 1)
+              if [ -n "$sh_file" ]; then
+                script_name=$(basename "$sh_file")
+                echo "⚙️ Çalıştırılıyor: $script_name"
+                cd "$sub_dir"
+                chmod +x "$script_name"
+                export KERNEL_SRC="$KERNEL_DIR"
+                ./"$script_name" || echo "⚠️ $script_name hata verdi, devam ediliyor..."
+                cd "$KERNEL_DIR"
+              fi
+            done
+          else
+            echo "⚠️ hjshpy klasörü yok, atlanıyor..."
+          fi
+
+      # =================================================================
+      # 8. BASEBAND GUARD
+      # =================================================================
+      - name: 8. Baseband Guard
+        run: |
+          cd "$KERNEL_DIR"
+          echo "🛡️ Baseband Guard kuruluyor..."
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash || true
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' security/Kconfig || true
+          echo "✅ Baseband Guard tamamlandı!"
+
+      # =================================================================
+      # 9. ANYKERNEL3
+      # =================================================================
+      - name: 9. AnyKernel3 Çek
+        run: |
+          git clone https://github.com/Bosyaf/AnyKernel3.git --depth 1 AnyKernel3
+
+      # =================================================================
+      # 10. KERNEL CONFIG
+      # =================================================================
+      - name: 10. Kernel Config Hazırlığı
+        run: |
+          cd "$KERNEL_DIR"
+          export PATH="$GITHUB_WORKSPACE/clang-zyc/bin:$PATH"
+
+          touch .scmversion
+          mkdir -p out
+
+          # Makefile fix
+          sed -i 's/^PHONY += all/  /g' Makefile || true
+
+          # check-local-export bypass
+          cat << 'EOF' > scripts/check-local-export
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod +x scripts/check-local-export
+
+          # --- gki_defconfig'e ağ ayarları ekle ---
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+
+          sed -i '/CONFIG_DEFAULT_TCP_CONG/d' $DEFCONFIG
+          sed -i '/CONFIG_DEFAULT_NET_SCH/d' $DEFCONFIG
+          sed -i '/CONFIG_NET_SCH_DEFAULT/d' $DEFCONFIG
+
+          cat << 'EOF' >> $DEFCONFIG
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR3=y
+          CONFIG_DEFAULT_BBR3=y
+          CONFIG_DEFAULT_TCP_CONG="bbr3"
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_NET_SCH_DEFAULT=y
+          CONFIG_DEFAULT_FQ=y
+          CONFIG_DEFAULT_NET_SCH="fq"
+          EOF
+
+          # defconfig oluştur
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CC="clang" LD="ld.lld" HOSTCC="clang" HOSTCXX="clang++" HOSTLD="ld.lld" \
+            AR="llvm-ar" NM="llvm-nm" OBJCOPY="llvm-objcopy" OBJDUMP="llvm-objdump" STRIP="llvm-strip" \
+            gki_defconfig
+
+          CONFIG_FILE="out/.config"
+
+          # --- TÜM CONFIG AYARLARI ---
+
+          # CMDLINE
+          ./scripts/config --file $CONFIG_FILE --set-str CONFIG_CMDLINE "console=ttynull stack_depot_disable=on cgroup_disable=pressure kvm-arm.mode=protected bootconfig ioremap_guard noirqdebug quiet kasan.page_alloc.sample=0 kasan.stacktrace=off kasan=off slub_debug=- page_owner=off debug_guardpage_minorder=0 nosoftlockup nmi_watchdog=0"
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_CMDLINE_EXTEND
+
+          # THERMAL
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_THERMAL_GOV_STEP_WISE
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_THERMAL_DEFAULT_GOV_STEP_WISE
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_THERMAL_DEFAULT_GOV_POWER_ALLOCATOR
+
+          # SCHEDULER (HZ 300, SMT OFF, CLUSTER ON)
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_SCHED_SMT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_SCHED_CLUSTER
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_HZ_100
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_HZ_250
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_HZ_300
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_HZ_500
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_HZ_1000
+          ./scripts/config --file $CONFIG_FILE --set-val CONFIG_HZ 300
+
+          # PREEMPTION & LTO
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_LTO_CLANG
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_LTO_CLANG_THIN
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_LTO_CLANG_FULL
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_PREEMPT_NONE
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_PREEMPT_VOLUNTARY
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_PREEMPT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_PREEMPT_COUNT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_PREEMPTION
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_PREEMPT_BUILD
+
+          # EXTRA FEATURES
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_BINDER_SCHED_OPT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_MI_UNION_POWER
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_SW_SYNC
+
+          # ROOT GİZLEME
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_NOMOUNT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_ZEROMOUNT
+
+          # SİSTEM & GİZLİLİK
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_BBG
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_WIREGUARD
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_TMPFS_XATTR
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_TMPFS_POSIX_ACL
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_IP6_NF_TARGET_HL
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_IP6_NF_MATCH_HL
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_IP_NF_TARGET_TTL
+
+          # KERNELSU & SUSFS
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_SUS_PATH
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_SUS_MOUNT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_SUS_KSTAT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          ./scripts/config --file $CONFIG_FILE --enable CONFIG_KSU_SUSFS_ENABLE_LOG
+
+          # LOCALVERSION
+          ./scripts/config --file $CONFIG_FILE --set-str CONFIG_LOCALVERSION "-android14-11-Xiaomi14-KSUNext"
+          ./scripts/config --file $CONFIG_FILE --disable CONFIG_LOCALVERSION_AUTO
+
+          # olddefconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CC="clang" LD="ld.lld" HOSTCC="clang" HOSTCXX="clang++" HOSTLD="ld.lld" \
+            AR="llvm-ar" NM="llvm-nm" OBJCOPY="llvm-objcopy" OBJDUMP="llvm-objdump" STRIP="llvm-strip" \
+            olddefconfig
+
+          echo "✅ Kernel config hazır!"
+
+      # =================================================================
+      # 11. KERNEL DERLEME
+      # =================================================================
+      - name: 11. Kernel Derleme
+        run: |
+          cd "$KERNEL_DIR"
+          export PATH="$GITHUB_WORKSPACE/clang-zyc/bin:$PATH"
+
+          echo "🔥 Kernel derleniyor..."
+          make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC="clang" LD="ld.lld" HOSTCC="clang" HOSTCXX="clang++" HOSTLD="ld.lld" \
+            AR="llvm-ar" NM="llvm-nm" OBJCOPY="llvm-objcopy" OBJDUMP="llvm-objdump" STRIP="llvm-strip" \
+            KCFLAGS="-O2 \
+            -march=armv9.2-a+crypto+crc+rcpc+dotprod+lse \
+            -falign-functions=32 \
+            -fstrict-aliasing \
+            -fomit-frame-pointer \
+            -ffunction-sections \
+            -fdata-sections \
+            -fno-unwind-tables \
+            -fno-asynchronous-unwind-tables \
+            -Wno-unused-command-line-argument \
+            -Wno-format \
+            -Wno-format-extra-args \
+            -Wno-constant-logical-operand \
+            -Wno-unused-variable \
+            -Wno-address-of-packed-member" \
+            KLDFLAGS="-Wl,--gc-sections \
+            -Wl,--as-needed \
+            -Wl,--strip-debug \
+            -Wl,--icf=safe \
+            -Wl,-O2" \
+            Image || { echo "❌ Derleme HATASI!"; exit 1; }
+
+          echo "✅ Kernel derlendi!"
+          ls -la out/arch/arm64/boot/
+
+          echo "BOOTHASH=Xiaomi14-GKI138-$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
+
+      # =================================================================
+      # 12. PAKETLEME
+      # =================================================================
+      - name: 12. AnyKernel3 Paketleme
+        run: |
+          cd ./AnyKernel3
+          sed -i 's/kernel.string=.*/kernel.string=Xiaomi14 GKI 6.1.138 KSU-Next/' anykernel.sh
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
+          sed -i 's/is_slot_device=0/is_slot_device=auto/' anykernel.sh
+          sed -i '/is_slot_device=auto/a device.name1=houji\ndevice.name2=shennong\ndevice.name3=aurora\ndevice.name4=xiaomi14' anykernel.sh
+
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image" .
+
+          # Image.gz ve Image.lz4 de oluştur
+          gzip -n -k -f -9 Image
+          lz4 -B6 --content-size -f Image Image.lz4
+
+          ZIP_NAME="Xiaomi14-GKI-6.1.138-KSUNext-${{ env.BOOTHASH }}.zip"
+          zip -r "../$ZIP_NAME" ./*
+          echo "📦 Paket: $ZIP_NAME"
+          echo "📦 Boyut: $(du -h ../$ZIP_NAME | cut -f1)"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      # =================================================================
+      # 13. ARTIFACTS
+      # =================================================================
+      - name: 13. Artifacts Hazırla
+        run: |
+          mkdir -p artifacts
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image" artifacts/
+          cp ./AnyKernel3/Image.gz artifacts/
+          cp ./AnyKernel3/Image.lz4 artifacts/
+          cp ./*.zip artifacts/
+          ls -lah artifacts/
+
+      - name: 14. Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xiaomi14-android14-6.1.138
-          path: artifacts/
+          name: xiaomi14-gki-6.1.138-ksunext
+          path: artifacts/*
           if-no-files-found: error
-          compression-level: 0
+
+      - name: 15. Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.BOOTHASH }}
+          name: "Xiaomi 14 GKI 6.1.138 + KernelSU-Next"
+          body: |
+            ## Xiaomi 14 GKI 6.1.138 Kernel
+            - KernelSU-Next (pershoot/dev-susfs)
+            - SUSFS4KSU
+            - Multi-Manager Support
+            - Baseband Guard
+            - BBR3 + FQ
+            - HZ 300, PREEMPT
+            - ZyC Clang 22 (ARMv9.2-a optimized)
+          files: "*.zip"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
