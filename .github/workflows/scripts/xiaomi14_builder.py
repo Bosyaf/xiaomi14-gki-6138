@@ -299,7 +299,7 @@ class Xiaomi14Builder:
         self._fix_base_c()
         self._prepare_bazel_tree()
 
-        def _fix_task_mmu(self):
+    def _fix_task_mmu(self):
         task_mmu = self.common_dir / "fs/proc/task_mmu.c"
         content = task_mmu.read_text(encoding="utf-8")
 
@@ -509,98 +509,4 @@ class Xiaomi14Builder:
             "integrate_kernelsu": self.integrate_kernelsu,
             "integrate_susfs": self.integrate_susfs,
             "apply_compat_fixes": self.apply_compat_fixes,
-            "configure_kernel": self.configure_kernel,
-            "build_kernel": self.build_kernel,
-            "package_artifacts": self.package_artifacts,
-        }
-
-        try:
-            self.preflight(selected_stages)
-            if preflight_only:
-                return BuildResult(
-                    success=True,
-                    message="预检通过",
-                    stage=selected_stages[-1],
-                    build_time=time.time() - started,
-                )
-
-            artifacts: list[str] = []
-            logger.info("执行阶段: %s", " -> ".join(selected_stages))
-            for current_stage in selected_stages:
-                logger.info("--- 阶段开始: %s ---", current_stage)
-                result = handlers[current_stage]()
-                if current_stage == "package_artifacts" and result:
-                    artifacts.extend(result)
-                logger.info("--- 阶段完成: %s ---", current_stage)
-
-            return BuildResult(
-                success=True,
-                message="构建完成",
-                stage=selected_stages[-1],
-                artifacts=artifacts,
-                build_time=time.time() - started,
-            )
-        except Exception as exc:
-            logger.error("构建失败 [%s]: %s", current_stage, exc)
-            return BuildResult(
-                success=False,
-                message=str(exc),
-                stage=current_stage,
-                build_time=time.time() - started,
-            )
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Xiaomi 14 Android14 6.1.138 kernel builder")
-    parser.add_argument("--workspace", default=os.environ.get("GKI_WORKSPACE", "/tmp/gki-build"))
-    parser.add_argument("--kernelsu-ref", default=DEFAULT_KERNELSU_REF)
-    parser.add_argument("--susfs-ref", default="")
-    parser.add_argument("--boot-sign-key-path", default=os.environ.get("BOOT_SIGN_KEY_PATH", ""))
-    parser.add_argument("--preflight-only", action="store_true")
-    parser.add_argument("--list-stages", action="store_true")
-    parser.add_argument("--from-stage", choices=Xiaomi14Builder.list_stages())
-    parser.add_argument("--until-stage", choices=Xiaomi14Builder.list_stages())
-    parser.add_argument("--verbose", action="store_true")
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
-
-    if args.list_stages:
-        for stage in Xiaomi14Builder.list_stages():
-            print(stage)
-        return 0
-
-    config = BuildConfig(
-        workspace=args.workspace,
-        kernelsu_ref=args.kernelsu_ref,
-        susfs_ref=args.susfs_ref,
-        boot_sign_key_path=args.boot_sign_key_path,
-    )
-    result = Xiaomi14Builder(config).build(
-        from_stage=args.from_stage,
-        until_stage=args.until_stage,
-        preflight_only=args.preflight_only,
-    )
-
-    print("=" * 60)
-    print("Xiaomi 14 Build Summary")
-    print("=" * 60)
-    print(f"Success : {result.success}")
-    print(f"Stage   : {result.stage}")
-    print(f"Message : {result.message}")
-    if result.artifacts:
-        print("Artifacts:")
-        for artifact in result.artifacts:
-            print(f"  - {artifact}")
-    print("=" * 60)
-
-    return 0 if result.success else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+            "configure_kernel": s
