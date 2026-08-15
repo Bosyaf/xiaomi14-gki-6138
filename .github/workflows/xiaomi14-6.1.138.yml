@@ -24,64 +24,87 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
-      - name: 1. Maximize build space
-        uses: AdityaGarg8/remove-unwanted-software@v4
+      # ========================================
+      # SWAP + DISK ALANI (OOM FIX - KRİTİK!)
+      # ========================================
+      - name: 1. Maximize build space + Create SWAP
+        uses: easimon/maximize-build-space@master
         with:
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-codeql: "true"
-          remove-docker-images: "true"
-          remove-large-packages: "true"
-          remove-swapfile: "true"
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 24576
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
-      - name: 2. Checkout code
+      - name: 2. Verify disk and swap
+        run: |
+          echo "=== Disk Alanı ==="
+          df -h /
+          echo ""
+          echo "=== Bellek + Swap ==="
+          free -h
+          echo ""
+          echo "=== Swap Detay ==="
+          swapon --show
+
+      - name: 3. Checkout code
         uses: actions/checkout@v4
 
-      - name: 3. Set up Python
+      - name: 4. Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: 4. Install dependencies
+      - name: 5. Install dependencies
         run: |
           sudo apt update
           sudo apt install -y ccache git curl wget zip unzip xz-utils openssl rsync patch
 
-      - name: 5. Configure ccache
+      - name: 6. Configure ccache
         run: |
           mkdir -p ~/.cache/bazel ~/.ccache
           ccache --max-size=2G
           ccache --set-config=compression=true
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
-      - name: 6. Orijinal Betiği Havada Yamala (Nükleer Çözüm)
+      - name: 7. Patch Python Builder (Warnings + OOM Fix)
         run: |
-          echo "🛠️ Derleyici hatalarını susturucu kod arka planda orijinal betiğe ekleniyor..."
-          # Python dosyasına elini sürmene gerek yok, bu komut uyarıları iptal eden kodu çalışmadan hemen önce ekler.
+          echo "🛠️ Python builder'a patch uygulanıyor..."
+          
+          # Derleyici uyarılarını sustur
           sed -i 's|task_mmu.write_text(content, encoding="utf-8")|task_mmu.write_text(content, encoding="utf-8")\n        with open(self.common_dir / "fs/proc/Makefile", "a") as f:\n            f.write("\\n\\nccflags-y += -Wno-error -Wno-unused-label -Wno-unused-function -Wno-unused-variable\\n")|' .github/workflows/scripts/xiaomi14_builder.py
+          
+          # ========================================
+          # OOM FIX: Bazel'a --jobs=2 ekle
+          # ========================================
+          sed -i 's|--config=fast --lto=thin //common:kernel_aarch64_dist|--config=fast --lto=thin --jobs=2 //common:kernel_aarch64_dist|' .github/workflows/scripts/xiaomi14_builder.py
+          
           chmod +x .github/workflows/scripts/xiaomi14_builder.py
+          echo "✅ Patch tamamlandı"
 
-      - name: 7. Build Xiaomi 14 preset
+      - name: 8. Build Xiaomi 14 preset
         run: |
-          echo "🔥 Orijinal Python Builder Başlatılıyor..."
+          echo "🔥 Python Builder Başlatılıyor..."
           python3 ./.github/workflows/scripts/xiaomi14_builder.py \
             --workspace "${{ env.GKI_WORKSPACE }}" \
             --kernelsu-ref "${{ github.event.inputs.kernelsu_ref }}" \
             --susfs-ref "${{ github.event.inputs.susfs_ref }}"
 
-      - name: 8. Prepare artifacts
+      - name: 9. Prepare artifacts
         run: |
           echo "📦 Çıktılar Toplanıyor..."
           mkdir -p artifacts
           cp -r "${{ env.GKI_WORKSPACE }}/android14-6.1-138/out/." artifacts/
           ls -la artifacts
 
-      - name: 9. Upload artifacts
+      - name: 10. Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: xiaomi14-android14-6.1.138
           path: artifacts/*
           if-no-files-found: error
-          
