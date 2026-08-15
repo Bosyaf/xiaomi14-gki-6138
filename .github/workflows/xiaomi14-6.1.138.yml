@@ -72,7 +72,7 @@ jobs:
           ccache --set-config=compression=true
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
-      - name: 7. Patch Python Builder (Warnings + OOM Fix)
+      - name: 7. Patch Python Builder
         run: |
           echo "🛠️ Python builder'a patch uygulanıyor..."
           
@@ -81,6 +81,9 @@ jobs:
           
           # OOM FIX: Bazel'a --jobs=2 ekle
           sed -i 's|--config=fast --lto=thin //common:kernel_aarch64_dist|--config=fast --lto=thin --jobs=2 //common:kernel_aarch64_dist|' .github/workflows/scripts/xiaomi14_builder.py
+          
+          # SHA256SUM FIX: Dizinleri hariç tut, sadece dosyaları hashle
+          sed -i 's|sha256sum \* > SHA256SUMS.txt|find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -exec sha256sum {} + > SHA256SUMS.txt|' .github/workflows/scripts/xiaomi14_builder.py
           
           chmod +x .github/workflows/scripts/xiaomi14_builder.py
           echo "✅ Patch tamamlandı"
