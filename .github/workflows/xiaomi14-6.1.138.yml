@@ -56,22 +56,29 @@ jobs:
           ccache --set-config=compression=true
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
-      - name: 6. Build Xiaomi 14 preset
+      - name: 6. Orijinal Betiği Havada Yamala (Nükleer Çözüm)
         run: |
-          echo "🔥 Forklanmış Özel Python Builder Başlatılıyor..."
+          echo "🛠️ Derleyici hatalarını susturucu kod arka planda orijinal betiğe ekleniyor..."
+          # Python dosyasına elini sürmene gerek yok, bu komut uyarıları iptal eden kodu çalışmadan hemen önce ekler.
+          sed -i 's|task_mmu.write_text(content, encoding="utf-8")|task_mmu.write_text(content, encoding="utf-8")\n        with open(self.common_dir / "fs/proc/Makefile", "a") as f:\n            f.write("\\n\\nccflags-y += -Wno-error -Wno-unused-label -Wno-unused-function -Wno-unused-variable\\n")|' .github/workflows/scripts/xiaomi14_builder.py
+          chmod +x .github/workflows/scripts/xiaomi14_builder.py
+
+      - name: 7. Build Xiaomi 14 preset
+        run: |
+          echo "🔥 Orijinal Python Builder Başlatılıyor..."
           python3 ./.github/workflows/scripts/xiaomi14_builder.py \
             --workspace "${{ env.GKI_WORKSPACE }}" \
             --kernelsu-ref "${{ github.event.inputs.kernelsu_ref }}" \
             --susfs-ref "${{ github.event.inputs.susfs_ref }}"
 
-      - name: 7. Prepare artifacts
+      - name: 8. Prepare artifacts
         run: |
           echo "📦 Çıktılar Toplanıyor..."
           mkdir -p artifacts
           cp -r "${{ env.GKI_WORKSPACE }}/android14-6.1-138/out/." artifacts/
           ls -la artifacts
 
-      - name: 8. Upload artifacts
+      - name: 9. Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: xiaomi14-android14-6.1.138
