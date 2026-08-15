@@ -25,6 +25,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
     steps:
       - name: 1. Maximize build space
         uses: AdityaGarg8/remove-unwanted-software@v4
@@ -44,6 +45,7 @@ jobs:
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
+
           echo ""
           echo "=== Bellek + Swap ==="
           free -h
@@ -51,6 +53,9 @@ jobs:
           echo "=== Disk Alanı ==="
           df -h /
           df -h /mnt || true
+          echo ""
+          echo "=== Swap Detay ==="
+          swapon --show
 
       - name: 3. Checkout code
         uses: actions/checkout@v4
@@ -75,16 +80,16 @@ jobs:
       - name: 7. Patch Python Builder
         run: |
           echo "🛠️ Python builder'a patch uygulanıyor..."
-          
+
           # Derleyici uyarılarını sustur
           sed -i 's|task_mmu.write_text(content, encoding="utf-8")|task_mmu.write_text(content, encoding="utf-8")\n        with open(self.common_dir / "fs/proc/Makefile", "a") as f:\n            f.write("\\n\\nccflags-y += -Wno-error -Wno-unused-label -Wno-unused-function -Wno-unused-variable\\n")|' .github/workflows/scripts/xiaomi14_builder.py
-          
-          # OOM FIX: Bazel'a --jobs=2 ekle
+
+          # OOM fix
           sed -i 's|--config=fast --lto=thin //common:kernel_aarch64_dist|--config=fast --lto=thin --jobs=2 //common:kernel_aarch64_dist|' .github/workflows/scripts/xiaomi14_builder.py
-          
-          # SHA256SUM FIX: Dizinleri hariç tut, sadece dosyaları hashle
+
+          # SHA256 fix
           sed -i 's|sha256sum \* > SHA256SUMS.txt|find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -exec sha256sum {} + > SHA256SUMS.txt|' .github/workflows/scripts/xiaomi14_builder.py
-          
+
           chmod +x .github/workflows/scripts/xiaomi14_builder.py
           echo "✅ Patch tamamlandı"
 
@@ -96,16 +101,61 @@ jobs:
             --kernelsu-ref "${{ github.event.inputs.kernelsu_ref }}" \
             --susfs-ref "${{ github.event.inputs.susfs_ref }}"
 
-      - name: 9. Prepare artifacts
+      - name: 9. Prepare artifacts (clean + full outputs)
         run: |
           echo "📦 Çıktılar Toplanıyor..."
-          mkdir -p artifacts
-          cp -r "${{ env.GKI_WORKSPACE }}/android14-6.1-138/out/." artifacts/
-          ls -la artifacts
+
+          ROOT="${{ env.GKI_WORKSPACE }}/android14-6.1-138"
+          OUT="$ROOT/out"
+          BAZEL="$ROOT/bazel-bin/common"
+
+          mkdir -p artifacts/out
+          mkdir -p artifacts/bazel
+
+          echo ""
+          echo "=== OUT klasöründen alınanlar ==="
+          find "$OUT" -maxdepth 1 -type f \( \
+            -name "*.zip" -o \
+            -name "*.txt" -o \
+            -name "Image*" -o \
+            -name "*.img" -o \
+            -name "*.tar.gz" \
+          \) -exec cp -v {} artifacts/out/ \; 2>/dev/null || true
+
+          echo ""
+          echo "=== BAZEL çıktılarından alınanlar ==="
+          find "$BAZEL" -type f \( \
+            -name "boot.img" -o \
+            -name "boot-gz.img" -o \
+            -name "boot-lz4.img" -o \
+            -name "boot-img.tar.gz" -o \
+            -name "gki-info.txt" -o \
+            -name "system_dlkm*.img" -o \
+            -name "system_dlkm*" -o \
+            -name "vendor_dlkm*.img" -o \
+            -name "vendor_dlkm*" -o \
+            -name "init_boot*.img" -o \
+            -name "vendor_boot*.img" -o \
+            -name "dtbo*.img" -o \
+            -name "*.ko" -o \
+            -name "modules.*" \
+          \) -exec cp -v {} artifacts/bazel/ \; 2>/dev/null || true
+
+          echo ""
+          echo "=== Artifact Özeti ==="
+          echo "--- artifacts/out ---"
+          ls -lah artifacts/out || true
+          echo ""
+          echo "--- artifacts/bazel ---"
+          ls -lah artifacts/bazel || true
+          echo ""
+          echo "=== Toplam Boyut ==="
+          du -sh artifacts || true
 
       - name: 10. Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: xiaomi14-android14-6.1.138
-          path: artifacts/*
+          path: artifacts/
           if-no-files-found: error
+          compression-level: 0
