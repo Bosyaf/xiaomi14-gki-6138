@@ -19,38 +19,38 @@ on:
 
 env:
   PYTHON_VERSION: "3.10"
-  GKI_WORKSPACE: "/tmp/gki-build"
+  GKI_WORKSPACE: "${{ github.workspace }}/gki-build"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
     steps:
-      # ========================================
-      # SWAP + DISK ALANI (OOM FIX - KRİTİK!)
-      # ========================================
-      - name: 1. Maximize build space + Create SWAP
-        uses: easimon/maximize-build-space@master
+      - name: 1. Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@v4
         with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          swap-size-mb: 24576
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          remove-large-packages: "true"
+          remove-swapfile: "true"
 
-      - name: 2. Verify disk and swap
+      - name: 2. Create 24GB SWAP
         run: |
-          echo "=== Disk Alanı ==="
-          df -h /
+          echo "🔧 24GB Swap oluşturuluyor..."
+          sudo fallocate -l 24G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=24576
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
           echo ""
           echo "=== Bellek + Swap ==="
           free -h
           echo ""
-          echo "=== Swap Detay ==="
-          swapon --show
+          echo "=== Disk Alanı ==="
+          df -h /
+          df -h /mnt || true
 
       - name: 3. Checkout code
         uses: actions/checkout@v4
@@ -79,9 +79,7 @@ jobs:
           # Derleyici uyarılarını sustur
           sed -i 's|task_mmu.write_text(content, encoding="utf-8")|task_mmu.write_text(content, encoding="utf-8")\n        with open(self.common_dir / "fs/proc/Makefile", "a") as f:\n            f.write("\\n\\nccflags-y += -Wno-error -Wno-unused-label -Wno-unused-function -Wno-unused-variable\\n")|' .github/workflows/scripts/xiaomi14_builder.py
           
-          # ========================================
           # OOM FIX: Bazel'a --jobs=2 ekle
-          # ========================================
           sed -i 's|--config=fast --lto=thin //common:kernel_aarch64_dist|--config=fast --lto=thin --jobs=2 //common:kernel_aarch64_dist|' .github/workflows/scripts/xiaomi14_builder.py
           
           chmod +x .github/workflows/scripts/xiaomi14_builder.py
